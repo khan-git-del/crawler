@@ -25,6 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Debug file presence
+        run: |
+          ls -la src/
+          pwd
+      
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
@@ -36,10 +41,10 @@ jobs:
         run: python setup_postgres.py
       
       - name: Crawl repositories
-        run: python src/min_crawler.py crawl --target 100000
+        run: python src/crawler.py crawl --target 100000
       
       - name: Export data
-        run: python src/min_crawler.py export --output repositories.csv
+        run: python src/crawler.py export --output repositories.csv
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
