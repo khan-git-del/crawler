@@ -46,7 +46,7 @@ jobs:
       - name: Crawl GitHub repos
         run: python src/crawler.py
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
           POSTGRES_HOST: localhost
           POSTGRES_DB: crawlerdb
           POSTGRES_USER: postgres
@@ -55,7 +55,6 @@ jobs:
 
       - name: Dump database to CSV
         run: |
-          pg_dump -h localhost -U postgres -d crawlerdb --data-only --column-inserts > dump.sql
           PGPASSWORD=postgres psql -h localhost -U postgres -d crawlerdb -c "\COPY repositories TO 'repositories.csv' CSV HEADER"
         env:
           PGPASSWORD: postgres
