@@ -1,96 +1,102 @@
-#!/usr/bin/env python3
-import asyncio
+import requests
+import time
 import os
-import csv
-import asyncpg
-import aiohttp
-import click
+import psycopg2
 from datetime import datetime
 
-async def graphql_query(session, token, query, variables):
-    async with session.post('https://api.github.com/graphql', json={'query': query, 'variables': variables},
-                           headers={'Authorization': f'Bearer {token}'}) as resp:
-        return await resp.json()
+token = os.environ["GITHUB_TOKEN"]
+headers = {"Authorization": f"bearer {token}"}
 
-async def crawl_repos(db_pool, token, target):
-    total = 0
+conn = psycopg2.connect(
+    host="localhost",
+    port="5432",
+    dbname="postgres",
+    user="postgres",
+    password=os.environ.get("POSTGRES_PASSWORD", "postgres")
+)
+cur = conn.cursor()
+
+def fetch_repos(search_query):
+    repos = []
     cursor = None
-    batch_size = 100
-    query = """
-    query ($cursor: String, $first: Int!) {
-        search(type: REPOSITORY, first: $first, after: $cursor, query: "stars:>0") {
+    has_next_page = True
+    repo_count = 0
+    while has_next_page and repo_count < 1000:
+        after = f'"{cursor}"' if cursor else "null"
+        gql = """
+        query {
+          search(query: "%s", type: REPOSITORY, first: 100, after: %s) {
             edges {
-                node {
-                    id
-                    nameWithOwner
-                    stargazerCount
-                    createdAt
+              node {
+                ... on Repository {
+                  nameWithOwner
+                  stargazerCount
                 }
-                cursor
+              }
             }
             pageInfo {
-                endCursor
-                hasNextPage
+              endCursor
+              hasNextPage
             }
+          }
+          rateLimit {
+            cost
+            remaining
+            resetAt
+          }
         }
-    }
-    """
-    
-    async with aiohttp.ClientSession() as session:
-        while total < target:
-            variables = {'first': batch_size, 'cursor': cursor}
-            result = await graphql_query(session, token, query, variables)
-            edges = result.get('data', {}).get('search', {}).get('edges', [])
-            if not edges:
+        """ % (search_query, after)
+        
+        retries = 3
+        while retries > 0:
+            try:
+                response = requests.post("https://api.github.com/graphql", json={"query": gql}, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                if "errors" in data:
+                    raise Exception(data["errors"])
                 break
-            repos = [(edge['node']['id'], edge['node']['nameWithOwner'], edge['node']['stargazerCount'],
-                     datetime.fromisoformat(edge['node']['createdAt'].replace('Z', '+00:00')))
-                     for edge in edges]
-            async with db_pool.acquire() as conn:
-                await conn.executemany('''
-                    INSERT INTO repositories (id, full_name, star_count, created_at)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (id) DO UPDATE SET star_count = EXCLUDED.star_count
-                ''', repos)
-            total += len(repos)
-            cursor = edges[-1]['cursor'] if result['data']['search']['pageInfo']['hasNextPage'] else None
-            if total % 1000 == 0:
-                print(f"Crawled {total} repositories")
-    
-    await db_pool.close()
-    print(f"Completed crawl with {total} repositories")
+            except Exception as e:
+                print(f"Error: {e}. Retrying in {5 * (4 - retries)}s...")
+                time.sleep(5 * (4 - retries))
+                retries -= 1
+        else:
+            print("Max retries exceeded.")
+            return repos
+        
+        rate_data = data["data"]["rateLimit"]
+        if rate_data["remaining"] < 100:
+            reset_time = datetime.fromisoformat(rate_data["resetAt"].replace("Z", "+00:00"))
+            sleep_sec = (reset_time - datetime.utcnow()).total_seconds() + 10
+            print(f"Rate low. Sleeping {sleep_sec}s until {rate_data['resetAt']}.")
+            time.sleep(max(0, sleep_sec))
+        
+        edges = data["data"]["search"]["edges"]
+        for edge in edges:
+            repo = edge["node"]
+            repos.append((repo["nameWithOwner"], repo["stargazerCount"]))
+        
+        cursor = data["data"]["search"]["pageInfo"]["endCursor"]
+        has_next_page = data["data"]["search"]["pageInfo"]["hasNextPage"]
+        repo_count += len(edges)
 
-async def export_data(db_pool, output):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch('SELECT full_name, star_count, created_at FROM repositories')
-        with open(output, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['full_name', 'star_count', 'created_at'])
-            writer.writerows(rows)
-    await db_pool.close()
-    print(f"Exported data to {output}")
+    return repos
 
-@click.group()
-def cli():
-    pass
+total_repos = 0
+for i in range(100):  # Adjust to lower for testing (e.g., 10 for ~10k repos)
+    print(f"Fetching for stars:{i}")
+    repos = fetch_repos(f"stars:{i} sort:stars-desc")
+    for full_name, stars in repos:
+        cur.execute("""
+        INSERT INTO repositories (full_name, stars) 
+        VALUES (%s, %s) 
+        ON CONFLICT (full_name) DO UPDATE SET stars = EXCLUDED.stars, updated_at = CURRENT_TIMESTAMP;
+        """, (full_name, stars))
+    conn.commit()
+    total_repos += len(repos)
+    print(f"Total repos so far: {total_repos}")
+    if total_repos >= 100000:
+        break
 
-@cli.command()
-@click.option('--target', default=100000)
-def crawl(target):
-    asyncio.run(async_crawl(target))
-
-@cli.command()
-@click.option('--output', default='repositories.csv')
-def export(output):
-    asyncio.run(async_export(output))
-
-async def async_crawl(target):
-    db_pool = await asyncpg.create_pool(os.environ['DATABASE_URL'])
-    await crawl_repos(db_pool, os.environ['GITHUB_TOKEN'], target)
-
-async def async_export(output):
-    db_pool = await asyncpg.create_pool(os.environ['DATABASE_URL'])
-    await export_data(db_pool, output)
-
-if __name__ == '__main__':
-    cli()
+cur.close()
+conn.close()
