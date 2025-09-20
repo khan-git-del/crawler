@@ -2,63 +2,45 @@ name: GitHub Repository Crawler
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-
+    
     services:
       postgres:
         image: postgres:15
         env:
-          POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: crawlerdb
+          POSTGRES_DB: github_crawler
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
-
+    
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/github_crawler
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
-
+          python-version: '3.11'
+      
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Setup Postgres schema
+      
+      - name: Setup database
         run: python setup_postgres.py
-        env:
-          POSTGRES_HOST: localhost
-          POSTGRES_DB: crawlerdb
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_PORT: 5432
-
-      - name: Crawl GitHub repos
-        run: python src/crawler.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
-          POSTGRES_HOST: localhost
-          POSTGRES_DB: crawlerdb
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_PORT: 5432
-
-      - name: Dump database to CSV
-        run: |
-          PGPASSWORD=postgres psql -h localhost -U postgres -d crawlerdb -c "\COPY repositories TO 'repositories.csv' CSV HEADER"
-        env:
-          PGPASSWORD: postgres
-
+      
+      - name: Crawl repositories
+        run: python src/min_crawler.py crawl --target 100000
+      
+      - name: Export data
+        run: python src/min_crawler.py export --output repositories.csv
+      
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
