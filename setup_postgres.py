@@ -1,19 +1,24 @@
-#!/usr/bin/env python3
-import asyncio
+import psycopg2
 import os
-import asyncpg
 
-async def setup():
-    conn = await asyncpg.connect(os.environ['DATABASE_URL'])
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS repositories (
-            id BIGINT PRIMARY KEY,
-            full_name VARCHAR(255) UNIQUE,
-            star_count INTEGER,
-            created_at TIMESTAMPTZ
-        )
-    ''')
-    await conn.close()
+conn = psycopg2.connect(
+    host="localhost",
+    port="5432",
+    dbname="postgres",
+    user="postgres",
+    password=os.environ.get("POSTGRES_PASSWORD", "postgres")
+)
+cur = conn.cursor()
 
-if __name__ == '__main__':
-    asyncio.run(setup())
+cur.execute("""
+CREATE TABLE IF NOT EXISTS repositories (
+    id SERIAL PRIMARY KEY,
+    full_name VARCHAR(255) UNIQUE NOT NULL,
+    stars INTEGER NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+""")
+
+conn.commit()
+cur.close()
+conn.close()
