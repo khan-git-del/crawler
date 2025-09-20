@@ -1,56 +1,56 @@
-name: GitHub Repository Crawler
+name: Crawler Pipeline
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '0 2 * * *'
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    
+
     services:
       postgres:
-        image: postgres:15
+        image: postgres
         env:
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: github_crawler
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
         ports:
           - 5432:5432
-    
-    env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/github_crawler
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Debug file presence
-        run: |
-          ls -la src/
-          pwd
-      
-      - uses: actions/setup-python@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      
+          python-version: '3.12'
+
       - name: Install dependencies
         run: pip install -r requirements.txt
-      
-      - name: Setup database
+
+      - name: Setup Postgres
         run: python setup_postgres.py
-      
-      - name: Crawl repositories
-        run: python src/crawler.py crawl --target 100000
-      
-      - name: Check database count
-        run: psql $DATABASE_URL -c "SELECT COUNT(*) FROM repositories;"
-      
-      - name: Export data
-        run: python src/crawler.py export --output repositories.csv
-      
-      - name: Upload artifact
+        env:
+          POSTGRES_PASSWORD: postgres
+
+      - name: Crawl Stars
+        run: python src/crawler.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          POSTGRES_PASSWORD: postgres
+
+      - name: Dump Database to CSV
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "COPY (SELECT full_name, stars FROM repositories) TO STDOUT WITH CSV HEADER" > repos.csv
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: repository-data
-          path: repositories.csv
+          name: repos-data
+          path: repos.csv
