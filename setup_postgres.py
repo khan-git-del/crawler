@@ -1,25 +1,19 @@
-import psycopg2
+#!/usr/bin/env python3
+import asyncio
 import os
+import asyncpg
 
-DB_HOST = os.getenv("POSTGRES_HOST", "localhost")
-DB_NAME = os.getenv("POSTGRES_DB", "crawlerdb")
-DB_USER = os.getenv("POSTGRES_USER", "postgres")
-DB_PASS = os.getenv("POSTGRES_PASSWORD", "postgres")
-DB_PORT = os.getenv("POSTGRES_PORT", "5432")
+async def setup():
+    conn = await asyncpg.connect(os.environ['DATABASE_URL'])
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS repositories (
+            id BIGINT PRIMARY KEY,
+            full_name VARCHAR(255) UNIQUE,
+            star_count INTEGER,
+            created_at TIMESTAMPTZ
+        )
+    ''')
+    await conn.close()
 
-conn = psycopg2.connect(
-    host=DB_HOST, dbname=DB_NAME, user=DB_USER, password=DB_PASS, port=DB_PORT
-)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS repositories (
-    repo_id TEXT PRIMARY KEY,
-    name TEXT,
-    stars INT,
-    last_updated TIMESTAMP
-);
-""")
-
-conn.commit()
-conn.close()
+if __name__ == '__main__':
+    asyncio.run(setup())
