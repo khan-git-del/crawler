@@ -77,14 +77,20 @@ def cli():
 @cli.command()
 @click.option('--target', default=100000)
 def crawl(target):
-    db_pool = await asyncpg.create_pool(os.environ['DATABASE_URL'])
-    asyncio.run(crawl_repos(db_pool, os.environ['GITHUB_TOKEN'], target))
+    asyncio.run(async_crawl(target))
 
 @cli.command()
 @click.option('--output', default='repositories.csv')
 def export(output):
+    asyncio.run(async_export(output))
+
+async def async_crawl(target):
     db_pool = await asyncpg.create_pool(os.environ['DATABASE_URL'])
-    asyncio.run(export_data(db_pool, output))
+    await crawl_repos(db_pool, os.environ['GITHUB_TOKEN'], target)
+
+async def async_export(output):
+    db_pool = await asyncpg.create_pool(os.environ['DATABASE_URL'])
+    await export_data(db_pool, output)
 
 if __name__ == '__main__':
     cli()
