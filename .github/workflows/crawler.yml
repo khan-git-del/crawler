@@ -43,6 +43,9 @@ jobs:
       - name: Crawl repositories
         run: python src/crawler.py crawl --target 100000
       
+      - name: Check database count
+        run: psql $DATABASE_URL -c "SELECT COUNT(*) FROM repositories;"
+      
       - name: Export data
         run: python src/crawler.py export --output repositories.csv
       
