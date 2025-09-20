@@ -1,113 +1,90 @@
+#!/usr/bin/env python3
+import asyncio
 import os
-import time
-import psycopg2
-import requests
+import csv
+import asyncpg
+import aiohttp
+import click
 from datetime import datetime
 
-# --- GitHub Config ---
-GITHUB_API = "https://api.github.com/graphql"
-TOKEN = os.getenv("GITHUB_TOKEN")
+async def graphql_query(session, token, query, variables):
+    async with session.post('https://api.github.com/graphql', json={'query': query, 'variables': variables},
+                           headers={'Authorization': f'Bearer {token}'}) as resp:
+        return await resp.json()
 
-# --- Postgres Config ---
-DB_HOST = os.getenv("POSTGRES_HOST", "localhost")
-DB_NAME = os.getenv("POSTGRES_DB", "crawlerdb")
-DB_USER = os.getenv("POSTGRES_USER", "postgres")
-DB_PASS = os.getenv("POSTGRES_PASSWORD", "postgres")
-DB_PORT = os.getenv("POSTGRES_PORT", "5432")
-
-# --- Connect to Postgres ---
-conn = psycopg2.connect(
-    host=DB_HOST, dbname=DB_NAME, user=DB_USER, password=DB_PASS, port=DB_PORT
-)
-cursor = conn.cursor()
-
-
-def init_db():
-    """Initialize the repositories table if not exists."""
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS repositories (
-        repo_id TEXT PRIMARY KEY,
-        name TEXT,
-        stars INT,
-        last_updated TIMESTAMP
-    );
-    """)
-    conn.commit()
-
-
-def safe_request(query, variables):
-    """Make GitHub API requests with rate limit handling."""
-    while True:
-        headers = {"Authorization": f"Bearer {TOKEN}"}
-        response = requests.post(GITHUB_API, json={"query": query, "variables": variables}, headers=headers)
-        data = response.json()
-
-        if "errors" in data:
-            errors = str(data["errors"])
-            if "rate limit" in errors.lower():
-                time.sleep(60)
-                continue
-            else:
-                return None
-        return data
-
-
-def crawl_repos(max_repos=100000):
-    """Crawl GitHub repositories and store stars into Postgres."""
+async def crawl_repos(db_pool, token, target):
+    total = 0
+    cursor = None
+    batch_size = 100
     query = """
-    query ($cursor: String) {
-      search(query: "sort:stars", type: REPOSITORY, first: 100, after: $cursor) {
-        pageInfo {
-          endCursor
-          hasNextPage
+    query ($cursor: String, $first: Int!) {
+        search(type: REPOSITORY, first: $first, after: $cursor, query: "stars:>0") {
+            edges {
+                node {
+                    id
+                    nameWithOwner
+                    stargazerCount
+                    createdAt
+                }
+                cursor
+            }
+            pageInfo {
+                endCursor
+                hasNextPage
+            }
         }
-        nodes {
-          id
-          nameWithOwner
-          stargazerCount
-        }
-      }
     }
     """
-
-    cursor_val = None
-    collected = 0
-
-    while collected < max_repos:
-        variables = {"cursor": cursor_val}
-        data = safe_request(query, variables)
-        if not data:
-            break
-
-        repos = data["data"]["search"]["nodes"]
-
-        for repo in repos:
-            repo_id = repo["id"]
-            name = repo["nameWithOwner"]
-            stars = repo["stargazerCount"]
-
-            cursor.execute("""
-            INSERT INTO repositories (repo_id, name, stars, last_updated)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (repo_id)
-            DO UPDATE SET stars = EXCLUDED.stars, last_updated = EXCLUDED.last_updated;
-            """, (repo_id, name, stars, datetime.utcnow()))
-
-            collected += 1
-            if collected >= max_repos:
+    
+    async with aiohttp.ClientSession() as session:
+        while total < target:
+            variables = {'first': batch_size, 'cursor': cursor}
+            result = await graphql_query(session, token, query, variables)
+            edges = result.get('data', {}).get('search', {}).get('edges', [])
+            if not edges:
                 break
+            repos = [(edge['node']['id'], edge['node']['nameWithOwner'], edge['node']['stargazerCount'],
+                     datetime.fromisoformat(edge['node']['createdAt'].replace('Z', '+00:00')))
+                     for edge in edges]
+            async with db_pool.acquire() as conn:
+                await conn.executemany('''
+                    INSERT INTO repositories (id, full_name, star_count, created_at)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (id) DO UPDATE SET star_count = EXCLUDED.star_count
+                ''', repos)
+            total += len(repos)
+            cursor = edges[-1]['cursor'] if result['data']['search']['pageInfo']['hasNextPage'] else None
+            if total % 1000 == 0:
+                print(f"Crawled {total} repositories")
+    
+    await db_pool.close()
+    print(f"Completed crawl with {total} repositories")
 
-        conn.commit()
+async def export_data(db_pool, output):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch('SELECT full_name, star_count, created_at FROM repositories')
+        with open(output, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['full_name', 'star_count', 'created_at'])
+            writer.writerows(rows)
+    await db_pool.close()
+    print(f"Exported data to {output}")
 
-        page_info = data["data"]["search"]["pageInfo"]
-        if not page_info["hasNextPage"]:
-            break
-        cursor_val = page_info["endCursor"]
+@click.group()
+def cli():
+    pass
 
-    print(f"Done! Total repos collected: {collected}")
+@cli.command()
+@click.option('--target', default=100000)
+def crawl(target):
+    db_pool = await asyncpg.create_pool(os.environ['DATABASE_URL'])
+    asyncio.run(crawl_repos(db_pool, os.environ['GITHUB_TOKEN'], target))
 
+@cli.command()
+@click.option('--output', default='repositories.csv')
+def export(output):
+    db_pool = await asyncpg.create_pool(os.environ['DATABASE_URL'])
+    asyncio.run(export_data(db_pool, output))
 
-if __name__ == "__main__":
-    init_db()
-    crawl_repos(100000)
-    conn.close()
+if __name__ == '__main__':
+    cli()
