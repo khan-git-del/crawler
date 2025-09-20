@@ -42,15 +42,12 @@ def safe_request(query, variables):
         response = requests.post(GITHUB_API, json={"query": query, "variables": variables}, headers=headers)
         data = response.json()
 
-        # Retry on rate limits
         if "errors" in data:
             errors = str(data["errors"])
             if "rate limit" in errors.lower():
-                print("⚠️ Rate limit hit. Sleeping 60s...")
                 time.sleep(60)
                 continue
             else:
-                print("❌ Error:", errors)
                 return None
         return data
 
@@ -59,7 +56,7 @@ def crawl_repos(max_repos=100000):
     """Crawl GitHub repositories and store stars into Postgres."""
     query = """
     query ($cursor: String) {
-      search(query: "stars:>0", type: REPOSITORY, first: 100, after: $cursor) {
+      search(query: "sort:stars", type: REPOSITORY, first: 100, after: $cursor) {
         pageInfo {
           endCursor
           hasNextPage
@@ -89,7 +86,6 @@ def crawl_repos(max_repos=100000):
             name = repo["nameWithOwner"]
             stars = repo["stargazerCount"]
 
-            # ✅ Upsert: insert or update existing row
             cursor.execute("""
             INSERT INTO repositories (repo_id, name, stars, last_updated)
             VALUES (%s, %s, %s, %s)
@@ -108,9 +104,7 @@ def crawl_repos(max_repos=100000):
             break
         cursor_val = page_info["endCursor"]
 
-        print(f"✅ Collected {collected} repos...")
-
-    print(f"🎉 Done! Total repos collected: {collected}")
+    print(f"Done! Total repos collected: {collected}")
 
 
 if __name__ == "__main__":
