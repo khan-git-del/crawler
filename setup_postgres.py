@@ -23,4 +23,3 @@ CREATE TABLE IF NOT EXISTS repositories (
 
 conn.commit()
 conn.close()
-print("✅ Postgres setup complete.")
